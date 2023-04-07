@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.10)
+
+project(lmdb_example)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_C_COMPILER "g++")
+
+add_compile_options(-fopenmp)
+add_compile_options(-fpermissive -W -Wall -Wno-unused-parameter -Wuninitialized)
+
+include_directories(./lmdb/)
+aux_source_directory(${CMAKE_SOURCE_DIR}/lmdb LMDB)
+add_executable(${PROJECT_NAME} ${CMAKE_SOURCE_DIR}/main.cpp ${LMDB})
+
+target_link_libraries(${PROJECT_NAME} -lpthread)
