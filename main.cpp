@@ -1,6 +1,9 @@
 #include <iostream>
 #include <string>
 #include <memory>
+#include <chrono>
+#include <iostream>
+#include <iomanip>
 #include "lmdb.h"
 
 using namespace std;
@@ -15,8 +18,14 @@ class Transaction {
     friend class TableDB;
 
 public:
+    ~Transaction(){
+
+    }
     int commit(){
         return mdb_txn_commit(txn_);
+    }
+    void abort(){
+        mdb_txn_abort(txn_);
     }
 };
 
@@ -25,6 +34,9 @@ class Iterator {
     MDB_val key_, data_;
     friend class TableDB;
 public:
+    ~Iterator(){
+
+    }
     bool next(){
       return mdb_cursor_get(cursor_, &key_, &data_, MDB_NEXT) == 0;
     }
@@ -37,29 +49,33 @@ public:
 };
 
 class TableDB {
-    MDB_env *env = nullptr;
-    MDB_dbi dbi = 0;
+    MDB_env *env_ = nullptr;
+    MDB_dbi dbi_ = 0;
 
 public:
     TableDB(const string& path, std::size_t size){
-        mdb_env_create(&env);
-        mdb_env_set_maxreaders(env, 1);
-        mdb_env_set_mapsize(env, size);
-        mdb_env_open(env, path.data(), MDB_FIXEDMAP |MDB_NOSYNC, 0664);
+        mdb_env_create(&env_);
+        mdb_env_set_maxreaders(env_, 100);
+        mdb_env_set_mapsize(env_, size);
+        mdb_env_set_maxdbs(env_, 40);
+        mdb_env_open(env_, path.data(), MDB_FIXEDMAP /*|MDB_NOSYNC*/, 0664);
     }
-
+    ~TableDB(){
+        mdb_dbi_close(env_, dbi_);
+        mdb_env_close(env_);
+    }
     int open(Transaction &txn, const string &db_name) {
-        return mdb_dbi_open(txn.txn_, db_name.data(), MDB_CREATE, &dbi);
+        return mdb_dbi_open(txn.txn_, db_name.data(), MDB_CREATE, &dbi_);
     }
 
     shared_ptr<Transaction> new_transaction() {
         auto txn = make_shared<Transaction>();
-        mdb_txn_begin(env, NULL, 0, &txn->txn_);
+        mdb_txn_begin(env_, NULL, 0, &txn->txn_);
         return txn;
     }
     shared_ptr<Iterator> new_iterator(Transaction &txn){
         auto iter = make_shared<Iterator>();
-        mdb_cursor_open(txn.txn_, dbi, &iter->cursor_);
+        mdb_cursor_open(txn.txn_, dbi_, &iter->cursor_);
         return iter;
     }
 
@@ -69,7 +85,7 @@ public:
         tmp_key.mv_data = (void *) key.data();
         tmp_data.mv_size = value.size();
         tmp_data.mv_data = (void *) value.data();
-        return mdb_put(txn.txn_, dbi, &tmp_key, &tmp_data, MDB_NOOVERWRITE);
+        return mdb_put(txn.txn_, dbi_, &tmp_key, &tmp_data, MDB_NOOVERWRITE);
     }
 
     int read(Iterator &iter, const string &key, string &out_value){
@@ -77,37 +93,60 @@ public:
         tmp_key.mv_data = (void*)key.data();
         tmp_key.mv_size = key.size();
         auto ret = mdb_cursor_get(iter.cursor_, &tmp_key, &tmp_data, MDB_NEXT);
-        out_value.assign((char*)tmp_data.mv_data,tmp_data.mv_size);
+        if(ret == 0){
+            out_value.assign((char*)tmp_data.mv_data,tmp_data.mv_size);
+        }
+
         return ret;
     }
 };
+void print_stats(const char* func_name, int time_cost){
+    cout.setf(ios::left);
+    std::cout << std::setw(32) <<func_name  << " timecost:" << time_cost << " μs"<<std::endl;
+}
 
-int main(int argc, char*argv[]){
-    // 创建数据库环境对象
-    MDB_env* env;
-    mdb_env_create(&env);
-    mdb_env_set_maxreaders(env, 1);
-    mdb_env_set_mapsize(env, 10485760);
-    mdb_env_open(env, "./testdb", MDB_FIXEDMAP |MDB_NOSYNC, 0664);
-    MDB_txn* txn;
-    mdb_txn_begin(env, NULL, 0, &txn);
-    MDB_dbi dbi;
-    mdb_dbi_open(txn, NULL, 0, &dbi);
+int main(int argc, char *argv[]) {
+    int rc = 0;
+    {
+        auto start = std::chrono::high_resolution_clock::now();
+        TableDB table_db(argv[1], 1024 << 20);
 
-    // 存储数据
-    string key = "hello";
-    string value = "world";
-    MDB_val k = { key.size(), (void*)key.data() };
-    MDB_val v = { value.size(), (void*)value.data() };
-    mdb_put(txn, dbi, &k, &v, 0);
+        auto txn = table_db.new_transaction();
+        E(table_db.open(*txn,"db1"));
 
-    // 提交事务
-    mdb_txn_commit(txn);
+        for(std::size_t i = 0; i < 1000000; ++i){
+            auto ret = table_db.write(*txn,to_string(i),to_string(i));
+            if(ret == 0){
 
-    // 关闭数据库表和环境对象
-    mdb_dbi_close(env, dbi);
-    mdb_env_close(env);
+            }
+        }
+        txn->commit();
+        auto elapsed = std::chrono::high_resolution_clock::now() - start;
+        int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+        print_stats("write",time_cost);
+    }
 
-    cout << "hello lmdb !!" <<endl;
+
+    {
+        auto start = std::chrono::high_resolution_clock::now();
+        TableDB table_db(argv[1], 1024 << 20);
+        auto new_txn = table_db.new_transaction();
+        E(table_db.open(*new_txn,"db1"));
+        auto iter = table_db.new_iterator(*new_txn);
+
+        for(std::size_t i = 0; i < 1000000; ++i){
+            string value;
+            if(table_db.read(*iter,to_string(i),value) == 0){
+//                std::cout << value << std::endl;
+            }
+        }
+        new_txn.reset();
+        auto elapsed = std::chrono::high_resolution_clock::now() - start;
+        int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+        print_stats("read",time_cost);
+    }
+
+
+    cout << "hello lmdb end!" << endl;
     return 0;
 }
