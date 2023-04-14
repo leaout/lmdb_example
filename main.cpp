@@ -5,6 +5,8 @@
 #include <iostream>
 #include <iomanip>
 #include <random>
+#include <assert.h>
+#include <string.h>
 #include "lmdb.h"
 
 using namespace std;
@@ -18,6 +20,74 @@ using namespace std;
         int ec = (stmt);                                                       \
         if (ec != MDB_SUCCESS) std::cout << "MDB_ERROR: " << mdb_strerror(ec); \
     } while (0)
+
+
+class Slice {
+public:
+
+    Slice() : data_(""), size_(0) {}
+
+    Slice(const char *d, size_t n) : data_(d), size_(n) {}
+
+
+    Slice(const std::string &s) : data_(s.data()), size_(s.size()) {}
+
+#ifdef __cpp_lib_string_view
+
+    Slice(std::string_view sv) : data_(sv.data()), size_(sv.size()) {}
+
+#endif
+
+    Slice(const char *s) : data_(s) { size_ = (s == nullptr) ? 0 : strlen(s); }
+
+    Slice(MDB_val &value) : data_((char *) value.mv_data), size_(value.mv_size) {}
+
+
+    const char *data() const { return data_; }
+
+    size_t size() const { return size_; }
+
+    bool empty() const { return size_ == 0; }
+
+    bool starts_with(const Slice &x) const {
+        return ((size_ >= x.size_) && (memcmp(data_, x.data_, x.size_) == 0));
+    }
+
+    bool ends_with(const Slice &x) const {
+        return ((size_ >= x.size_) &&
+                (memcmp(data_ + size_ - x.size_, x.data_, x.size_) == 0));
+    }
+
+    std::string to_string(bool hex = false) const {
+        std::string result(data_, size_);
+        return result;
+    }
+
+#ifdef __cpp_lib_string_view
+
+    std::string_view to_string_view() const {
+        return std::string_view(data_, size_);
+    }
+
+#endif
+
+    MDB_val to_mdb_val() {
+        MDB_val ret;
+        ret.mv_data = (void *) data_;
+        ret.mv_size = size_;
+        return ret;
+    }
+
+    const char *data_;
+    size_t size_;
+};
+
+inline bool operator==(const Slice& x, const Slice& y) {
+    return ((x.size() == y.size()) &&
+            (memcmp(x.data(), y.data(), x.size()) == 0));
+}
+
+inline bool operator!=(const Slice& x, const Slice& y) { return !(x == y); }
 
 class DBEnv;
 class DBInstance;
@@ -41,6 +111,7 @@ public:
 class Iterator {
     MDB_cursor *cursor_ = nullptr;
     MDB_val key_, data_;
+    bool valid_ = false;
     friend class DBEnv;
 
     friend class DBInstance;
@@ -50,30 +121,44 @@ public:
         mdb_cursor_close(cursor_);
     }
 
-    bool next() {
-        return mdb_cursor_get(cursor_, &key_, &data_, MDB_NEXT) == MDB_SUCCESS;
+    void next() {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_NEXT) == MDB_SUCCESS);
     }
 
-    bool prev() {
-        return mdb_cursor_get(cursor_, &key_, &data_, MDB_PREV) == MDB_SUCCESS;
+    void prev() {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_PREV) == MDB_SUCCESS);
     }
 
-    bool seek_last() {
-        return mdb_cursor_get(cursor_, &key_, &data_, MDB_LAST) == MDB_SUCCESS;
+    void seek_last() {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_LAST) == MDB_SUCCESS);
     }
 
-    bool seek_first() {
-        return mdb_cursor_get(cursor_, &key_, &data_, MDB_FIRST) == MDB_SUCCESS;
+    void seek_first() {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_FIRST) == MDB_SUCCESS);
+    }
+    bool has_key(Slice key){
+        key_ = key.to_mdb_val();
+        return mdb_cursor_get(cursor_, &key_, &data_, MDB_SET) == MDB_SUCCESS;
+    }
+    bool get(Slice key){
+        key_ = key.to_mdb_val();
+        return mdb_cursor_get(cursor_, &key_, &data_, MDB_SET_KEY) == MDB_SUCCESS;
+    }
+    void seek_to(Slice key){
+        key_ = key.to_mdb_val();
+        valid_ = (mdb_cursor_get(cursor_, &key_, &data_, MDB_SET_RANGE) == MDB_SUCCESS);
     }
 
-    MDB_val key() {
+    Slice key() {
         return key_;
     }
 
-    MDB_val value() {
+    Slice value() {
         return data_;
     }
-
+    bool valid(){
+        return valid_;
+    }
 };
 
 class DBEnv {
@@ -82,12 +167,11 @@ class DBEnv {
     friend class DBInstance;
 public:
     DBEnv(const string& path, std::size_t size){
-        int rc;
         CHECK_MDB(mdb_env_create(&env_));
-        E(mdb_env_set_maxreaders(env_, 100));
-        E(mdb_env_set_mapsize(env_, size));
-        E(mdb_env_set_maxdbs(env_, 40));
-        E(mdb_env_open(env_, path.data(), MDB_FIXEDMAP /*|MDB_NOSYNC*/, 0664));
+        CHECK_MDB(mdb_env_set_maxreaders(env_, 100));
+        CHECK_MDB(mdb_env_set_mapsize(env_, size));
+        CHECK_MDB(mdb_env_set_maxdbs(env_, 40));
+        CHECK_MDB(mdb_env_open(env_, path.data(), MDB_FIXEDMAP /*|MDB_NOSYNC*/, 0664));
     }
     ~DBEnv(){
         mdb_env_close(env_);
@@ -112,12 +196,9 @@ public:
         mdb_dbi_close(env.env_, dbi_);
     }
 
-    int write(Transaction &txn, const string &key, const string &value) {
-        MDB_val tmp_key, tmp_data;
-        tmp_key.mv_size = key.size();
-        tmp_key.mv_data = (void *) key.data();
-        tmp_data.mv_size = value.size();
-        tmp_data.mv_data = (void *) value.data();
+    int write(Transaction &txn, Slice key, Slice value) {
+        MDB_val tmp_key = key.to_mdb_val();
+        MDB_val tmp_data = value.to_mdb_val();
         return mdb_put(txn.txn_, dbi_, &tmp_key, &tmp_data, MDB_NOOVERWRITE);
     }
 
@@ -127,21 +208,19 @@ public:
         return iter;
     }
 
-    int del(Transaction &txn,string& key){
+    int del(Transaction &txn, Slice &key) {
         MDB_val tmp_key, tmp_data;
-        tmp_key.mv_data = key.data();
-        tmp_key.mv_size = key.size();
+        tmp_key = key.to_mdb_val();
         return mdb_del(txn.txn_, dbi_, &tmp_key, &tmp_data);
     }
 
-    bool get(Transaction &txn, string &key, string &out_value) {
-        MDB_val tmp_key, tmp_value;
-        tmp_key.mv_data = key.data();
-        tmp_key.mv_size = key.size();
+    bool get(Transaction &txn, Slice key, Slice &out_value) {
+        MDB_val tmp_value;
+        MDB_val tmp_key = key.to_mdb_val();
         auto ret = mdb_get(txn.txn_, dbi_, &tmp_key, &tmp_value);
         CHECK_MDB(ret);
-        if(ret == MDB_SUCCESS){
-            out_value.assign((char *)tmp_value.mv_data, tmp_value.mv_size);
+        if (ret == MDB_SUCCESS) {
+            out_value = tmp_value;
             return true;
         }
 
@@ -161,7 +240,6 @@ int main(int argc, char *argv[]) {
     {
         auto start = std::chrono::high_resolution_clock::now();
 
-
         auto txn = db_env.new_transaction();
 
         DBInstance db_ins;
@@ -170,7 +248,6 @@ int main(int argc, char *argv[]) {
         for(std::size_t i = 0; i < 1000000; ++i){
             auto ret = db_ins.write(*txn,to_string(i),to_string(i));
             if(ret == 0){
-
             }
         }
         txn->commit();
@@ -191,7 +268,7 @@ int main(int argc, char *argv[]) {
 
         auto iter = db_ins.new_iterator(*new_txn);
         int counter = 0;
-        while(iter->next()){
+        for(iter->seek_first();iter->valid(); iter->next()){
             ++counter;
         }
         new_txn->abort();
@@ -220,12 +297,40 @@ int main(int argc, char *argv[]) {
         std::random_device rd;  // 将用于为随机数引擎获得种子
         std::mt19937 gen(rd()); // 以播种标准 mersenne_twister_engine
         std::uniform_int_distribution<> dis(0, 999999);
-        for(std::size_t i = 0; i < 1000000; ++i){
+        for (std::size_t i = 0; i < 1000000; ++i) {
             string key = to_string(dis(gen));
-            string out_value;
-            if(db_ins.get(*new_txn,key,out_value)){
+            Slice out_value;
+            if (db_ins.get(*new_txn, key, out_value)) {
                 ++counter;
             }
+        }
+        new_txn->abort();
+        std::cout << "iter counter :" << counter << std::endl;
+
+        iter.reset();
+        new_txn.reset();
+        db_ins.close(db_env);
+        auto elapsed = std::chrono::high_resolution_clock::now() - start;
+        int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+        print_stats("rand read",time_cost);
+    }
+
+    {
+        //cursor seek
+        auto start = std::chrono::high_resolution_clock::now();
+
+        auto new_txn = db_env.new_transaction(MDB_RDONLY);
+        DBInstance db_ins;
+        db_ins.init(*new_txn,"db1");
+
+
+        auto iter = db_ins.new_iterator(*new_txn);
+        int counter = 0;
+        string seek_key = "1";
+        for (iter->seek_to(seek_key); iter->valid() &&
+                                      iter->key().starts_with(seek_key); iter->next()) {
+//            std::cout << "value :" << iter->value().to_string_view() << std::endl;
+            ++counter;
         }
 
         std::cout << "iter counter :" << counter << std::endl;
@@ -234,7 +339,7 @@ int main(int argc, char *argv[]) {
         new_txn.reset();
         auto elapsed = std::chrono::high_resolution_clock::now() - start;
         int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-        print_stats("read",time_cost);
+        print_stats("cursor",time_cost);
     }
 
 
