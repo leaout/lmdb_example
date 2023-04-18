@@ -344,6 +344,9 @@ void rand_parallel_read_test(DBEnv& db_env){
         string key = to_string(my_rand(0,FLAGS_count));
         Slice out_value;
         if (db_ins.get(*new_txn, key, out_value)) {
+            if(FLAGS_print){
+                std::cout << "get key:" << key<<" value :" <<out_value.to_string() << std::endl;
+            }
 //            ++counter;
         }
     }
