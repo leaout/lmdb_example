@@ -17,4 +17,4 @@ include_directories(./lmdb/)
 aux_source_directory(${CMAKE_SOURCE_DIR}/lmdb LMDB)
 add_executable(${PROJECT_NAME} ${CMAKE_SOURCE_DIR}/main.cpp ${LMDB})
 
-target_link_libraries(${PROJECT_NAME} -lpthread -lgflags)
+target_link_libraries(${PROJECT_NAME} -lpthread -lgflags -lgomp)

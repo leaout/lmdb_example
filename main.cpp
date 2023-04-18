@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <string.h>
 #include <gflags/gflags.h>
+#include <omp.h>
 #include "lmdb.h"
 
 using namespace std;
@@ -230,9 +231,10 @@ public:
 
 };
 
-void print_stats(const char* func_name, int time_cost){
+void print_stats(const char* func_name, int time_cost,size_t counter){
     cout.setf(ios::left);
-    std::cout << std::setw(32) <<func_name  << " timecost:" << time_cost << " μs"<<std::endl;
+//    std::cout << std::setw(32) <<func_name  << " timecost:" << time_cost << " μs"<<std::endl;
+    std::cout << std::setw(32) <<func_name  << " : " << counter / (double)time_cost * 1000*1000 << " op/s"<< " total:" << counter << " timecost:" << time_cost << " μs"<<std::endl;
 }
 DEFINE_string(type, "", "");
 DEFINE_string(prefix_seek, "1", "param for prefix seek");
@@ -248,16 +250,17 @@ void write_test(DBEnv& db_env){
 
     DBInstance db_ins;
     db_ins.init(*txn,"db1");
-
+    size_t counter = 0;
     for(std::size_t i = 0; i < FLAGS_count; ++i){
         auto ret = db_ins.write(*txn,to_string(i),to_string(i));
         if(ret == 0){
+            ++counter;
         }
     }
     txn->commit();
     auto elapsed = std::chrono::high_resolution_clock::now() - start;
     int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-    print_stats(__FUNCTION__,time_cost);
+    print_stats(__FUNCTION__,time_cost,counter);
     db_ins.close(db_env);
 }
 
@@ -270,12 +273,12 @@ void iter_test(DBEnv& db_env){
 
 
     auto iter = db_ins.new_iterator(*new_txn);
-    int counter = 0;
+    size_t counter = 0;
     for(iter->seek_first();iter->valid(); iter->next()){
         ++counter;
     }
     new_txn->abort();
-    std::cout << "iter counter :" << counter << std::endl;
+
 
     iter.reset();
     new_txn.reset();
@@ -283,7 +286,7 @@ void iter_test(DBEnv& db_env){
     db_ins.close(db_env);
     auto elapsed = std::chrono::high_resolution_clock::now() - start;
     int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-    print_stats(__FUNCTION__,time_cost);
+    print_stats(__FUNCTION__,time_cost,counter);
 }
 void rand_read_test(DBEnv& db_env){
     //rand read
@@ -295,7 +298,7 @@ void rand_read_test(DBEnv& db_env){
 
 
     auto iter = db_ins.new_iterator(*new_txn);
-    int counter = 0;
+    size_t counter = 0;
     std::random_device rd;  // 将用于为随机数引擎获得种子
     std::mt19937 gen(rd()); // 以播种标准 mersenne_twister_engine
     std::uniform_int_distribution<> dis(0, FLAGS_count);
@@ -307,15 +310,54 @@ void rand_read_test(DBEnv& db_env){
         }
     }
     new_txn->abort();
-    std::cout << "iter counter :" << counter << std::endl;
 
     iter.reset();
     new_txn.reset();
     db_ins.close(db_env);
     auto elapsed = std::chrono::high_resolution_clock::now() - start;
     int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-    print_stats(__FUNCTION__,time_cost);
+    print_stats(__FUNCTION__,time_cost,counter);
 }
+
+int my_rand(const int & min, const int & max) {
+    static thread_local std::mt19937 generator;
+    std::uniform_int_distribution<int> distribution(min,max);
+    return distribution(generator);
+}
+
+void rand_parallel_read_test(DBEnv& db_env){
+    //rand read
+    auto start = std::chrono::high_resolution_clock::now();
+
+    auto new_txn = db_env.new_transaction(MDB_RDONLY);
+    DBInstance db_ins;
+    db_ins.init(*new_txn,"db1");
+
+
+    auto iter = db_ins.new_iterator(*new_txn);
+//    size_t counter = 0;
+//    std::random_device rd;  // 将用于为随机数引擎获得种子
+//    std::mt19937 gen(rd()); // 以播种标准 mersenne_twister_engine
+//    std::uniform_int_distribution<> dis(0, FLAGS_count);
+#pragma omp parallel for
+    for (std::size_t i = 0; i < FLAGS_read_count; ++i) {
+        string key = to_string(my_rand(0,FLAGS_count));
+        Slice out_value;
+        if (db_ins.get(*new_txn, key, out_value)) {
+//            ++counter;
+        }
+    }
+    new_txn->abort();
+
+    iter.reset();
+    new_txn.reset();
+    db_ins.close(db_env);
+    auto elapsed = std::chrono::high_resolution_clock::now() - start;
+    int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    print_stats(__FUNCTION__,time_cost,FLAGS_read_count);
+}
+
+
 void prefix_seek_test(DBEnv& db_env, const string& seek_key){
     //cursor seek
     auto start = std::chrono::high_resolution_clock::now();
@@ -326,7 +368,7 @@ void prefix_seek_test(DBEnv& db_env, const string& seek_key){
 
 
     auto iter = db_ins.new_iterator(*new_txn);
-    int counter = 0;
+    size_t counter = 0;
 
     for (iter->seek_to(seek_key); iter->valid() &&
                                   iter->key().starts_with(seek_key); iter->next()) {
@@ -336,13 +378,11 @@ void prefix_seek_test(DBEnv& db_env, const string& seek_key){
         ++counter;
     }
 
-    std::cout << "iter counter :" << counter << std::endl;
-
     iter.reset();
     new_txn.reset();
     auto elapsed = std::chrono::high_resolution_clock::now() - start;
     int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-    print_stats(__FUNCTION__,time_cost);
+    print_stats(__FUNCTION__,time_cost,counter);
 }
 
 int main(int argc, char *argv[]) {
@@ -355,6 +395,8 @@ int main(int argc, char *argv[]) {
         iter_test(db_env);
     }else if(FLAGS_type == "random_read"){
         rand_read_test(db_env);
+    }else if(FLAGS_type == "random_read_parallel"){
+        rand_parallel_read_test(db_env);
     }else if(FLAGS_type == "seek"){
         prefix_seek_test(db_env,FLAGS_prefix_seek);
     }
