@@ -168,12 +168,12 @@ class DBEnv {
 
     friend class DBInstance;
 public:
-    DBEnv(const string& path, std::size_t size){
+    DBEnv(const string& path, std::size_t size,unsigned int flag = (MDB_FIXEDMAP|MDB_NOSYNC)){
         CHECK_MDB(mdb_env_create(&env_));
         CHECK_MDB(mdb_env_set_maxreaders(env_, 100));
         CHECK_MDB(mdb_env_set_mapsize(env_, size));
         CHECK_MDB(mdb_env_set_maxdbs(env_, 40));
-        CHECK_MDB(mdb_env_open(env_, path.data(), MDB_FIXEDMAP /*|MDB_NOSYNC*/, 0664));
+        CHECK_MDB(mdb_env_open(env_, path.data(), flag, 0664));
     }
     ~DBEnv(){
         mdb_env_close(env_);
@@ -191,17 +191,17 @@ class DBInstance{
     MDB_dbi dbi_ = 0;
 public:
     DBInstance() = default;
-    int init(Transaction &txn, const string& db_name){
-        return mdb_dbi_open(txn.txn_, db_name.data(), MDB_CREATE, &dbi_);
+    int init(Transaction &txn, const string& db_name,unsigned int flag = MDB_CREATE){
+        return mdb_dbi_open(txn.txn_, db_name.data(), flag, &dbi_);
     }
     void close(DBEnv& env){
         mdb_dbi_close(env.env_, dbi_);
     }
 
-    int write(Transaction &txn, Slice key, Slice value) {
+    int write(Transaction &txn, Slice key, Slice value, unsigned flag = MDB_NOOVERWRITE) {
         MDB_val tmp_key = key.to_mdb_val();
         MDB_val tmp_data = value.to_mdb_val();
-        return mdb_put(txn.txn_, dbi_, &tmp_key, &tmp_data, MDB_NOOVERWRITE);
+        return mdb_put(txn.txn_, dbi_, &tmp_key, &tmp_data, flag);
     }
 
     shared_ptr<Iterator> new_iterator(Transaction &txn) {
