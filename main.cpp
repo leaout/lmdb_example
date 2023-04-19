@@ -119,24 +119,42 @@ class Iterator {
     friend class DBInstance;
 
 public:
+    enum class NextType {
+        Next = MDB_NEXT,
+        Dup = MDB_NEXT_DUP,
+        NoDup = MDB_NEXT_NODUP
+    };
+    enum class PrevType {
+        Prev = MDB_PREV,
+        Dup = MDB_PREV_DUP,
+        NoDup = MDB_PREV_NODUP
+    };
+    enum class FirstType {
+        First = MDB_FIRST,
+        Dup = MDB_FIRST_DUP,
+    };
+    enum class LastType {
+        Last = MDB_LAST,
+        Dup = MDB_LAST_DUP,
+    };
     ~Iterator() {
         mdb_cursor_close(cursor_);
     }
 
-    void next() {
-        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_NEXT) == MDB_SUCCESS);
+    void next(NextType nt = NextType::Next) {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, (MDB_cursor_op)nt) == MDB_SUCCESS);
     }
 
-    void prev() {
-        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_PREV) == MDB_SUCCESS);
+    void prev(PrevType pt = PrevType::Prev) {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, (MDB_cursor_op)pt) == MDB_SUCCESS);
     }
 
-    void seek_last() {
-        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_LAST) == MDB_SUCCESS);
+    void seek_last(LastType lt = LastType::Last) {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, (MDB_cursor_op)lt) == MDB_SUCCESS);
     }
 
-    void seek_first() {
-        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, MDB_FIRST) == MDB_SUCCESS);
+    void seek_first(FirstType ft = FirstType::First) {
+        valid_ = ( mdb_cursor_get(cursor_, &key_, &data_, (MDB_cursor_op)ft) == MDB_SUCCESS);
     }
     bool has_key(Slice key){
         key_ = key.to_mdb_val();
