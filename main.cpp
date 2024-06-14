@@ -319,7 +319,7 @@ void rand_read_test(DBEnv& db_env){
     size_t counter = 0;
     std::random_device rd;  // 将用于为随机数引擎获得种子
     std::mt19937 gen(rd()); // 以播种标准 mersenne_twister_engine
-    std::uniform_int_distribution<> dis(0, FLAGS_count);
+    std::uniform_int_distribution<> dis(0, FLAGS_count-1);
     for (std::size_t i = 0; i < FLAGS_read_count; ++i) {
         string key = to_string(dis(gen));
         Slice out_value;
